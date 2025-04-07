@@ -28,19 +28,29 @@ def get_binance_price(symbol: str) -> float:
 
 def get_funding_rate(symbol: str) -> dict:
     """Get funding rate data"""
-    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
+    # FIXED: Using the correct endpoint for futures funding rate
+    url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol.upper()}"
     data = make_api_request(url)
-    if not data:
+    if not data or len(data) == 0:
         return None
     
+    # The funding rate endpoint returns an array, so we need to get the first item
+    funding_data = data[0] if isinstance(data, list) else data
+    
+    # Get the mark price separately since it's not in the funding rate endpoint
+    mark_price_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
+    mark_price_data = make_api_request(mark_price_url)
+    mark_price = float(mark_price_data.get('markPrice', 0)) if mark_price_data else 0
+    
     return {
-        'last_funding_rate': float(data.get('lastFundingRate', 0)) * 100,
-        'next_funding_time': datetime.fromtimestamp(data.get('nextFundingTime', 0)/1000),
-        'mark_price': float(data.get('markPrice', 0))
+        'last_funding_rate': float(funding_data.get('fundingRate', 0)) * 100,
+        'next_funding_time': datetime.fromtimestamp(int(funding_data.get('fundingTime', 0))/1000),
+        'mark_price': mark_price
     }
 
 def get_market_data(symbol: str) -> dict:
     """Get additional market data"""
+    # FIXED: Using the correct endpoint for futures market data
     url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol.upper()}"
     data = make_api_request(url)
     if not data:
@@ -55,7 +65,8 @@ def get_market_data(symbol: str) -> dict:
 
 def get_historical_prices(symbol, interval='1h', limit=24):
     """Get historical price data for charting"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
+    # FIXED: Using the correct futures klines endpoint for futures data
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
     data = make_api_request(url)
     if not data:
         return None
