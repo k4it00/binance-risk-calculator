@@ -4,8 +4,86 @@ import time
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import json
+import random
 
-# === Binance API functions with error handling and rate limiting ===
+# === Mock data functions for when API access is restricted ===
+def generate_mock_price_data(base_price=30000, volatility=0.02, bars=24):
+    """Generate realistic mock price data for testing"""
+    timestamps = []
+    prices = []
+    
+    current_price = base_price
+    now = datetime.now()
+    
+    for i in range(bars):
+        # Generate timestamp (going back in time)
+        ts = now - timedelta(hours=(bars-i))
+        timestamps.append(ts)
+        
+        # Randomly adjust price with some volatility
+        change = random.uniform(-volatility, volatility)
+        current_price = current_price * (1 + change)
+        prices.append(current_price)
+    
+    # Create OHLC data from the price series
+    data = []
+    for i, (ts, close) in enumerate(zip(timestamps, prices)):
+        # Create some variation in OHLC
+        open_price = close * (1 - random.uniform(-0.005, 0.005))
+        high = max(open_price, close) * (1 + random.uniform(0.001, 0.008))
+        low = min(open_price, close) * (1 - random.uniform(0.001, 0.008))
+        
+        # Format similar to Binance API response
+        data.append([
+            int(ts.timestamp() * 1000),  # timestamp in ms
+            str(open_price),
+            str(high),
+            str(low),
+            str(close),
+            str(close * random.uniform(50, 500)),  # volume
+            int((ts + timedelta(hours=1)).timestamp() * 1000),  # close time
+            str(close * random.uniform(50, 500) * close),  # quote asset volume
+            str(random.randint(1000, 10000)),  # number of trades
+            str(close * random.uniform(20, 200)),  # taker buy base
+            str(close * random.uniform(20, 200) * close),  # taker buy quote
+            "0"  # ignore
+        ])
+    
+    return data
+
+def get_mock_price():
+    """Get mock current price"""
+    # Realistic BTC price range
+    return random.uniform(29000, 33000)
+
+def get_mock_funding_rate():
+    """Get mock funding rate data"""
+    now = datetime.now()
+    # Next funding time is every 8 hours: 00:00, 08:00, 16:00 UTC
+    current_hour = now.hour
+    next_funding_hour = (current_hour // 8 + 1) * 8 % 24
+    next_funding_time = now.replace(hour=next_funding_hour, minute=0, second=0, microsecond=0)
+    if next_funding_hour < current_hour:
+        next_funding_time += timedelta(days=1)
+    
+    # Realistic funding rate
+    return {
+        'last_funding_rate': random.uniform(-0.05, 0.05),
+        'next_funding_time': next_funding_time,
+        'mark_price': get_mock_price()
+    }
+
+def get_mock_market_data(base_price):
+    """Get mock market data"""
+    return {
+        'volume': random.uniform(10000, 50000),
+        'price_change_percent': random.uniform(-5, 5),
+        'high': base_price * (1 + random.uniform(0.01, 0.05)),
+        'low': base_price * (1 - random.uniform(0.01, 0.05))
+    }
+
+# === Binance API functions with error handling, rate limiting, and mock data fallback ===
 def make_api_request(url, max_retries=3, retry_delay=1):
     """Make API request with retry logic and proper error handling"""
     for attempt in range(max_retries):
@@ -15,61 +93,76 @@ def make_api_request(url, max_retries=3, retry_delay=1):
             return response.json()
         except requests.exceptions.RequestException as e:
             if attempt == max_retries - 1:
-                st.error(f"Error fetching data: {e}")
+                st.warning(f"Warning: Could not connect to Binance API. Using mock data for demonstration.")
                 return None
             time.sleep(retry_delay)
     return None
 
 def get_binance_price(symbol: str) -> float:
-    """Get current price from Binance with improved error handling"""
+    """Get current price from Binance with mock data fallback"""
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}"
     data = make_api_request(url)
-    return float(data['price']) if data else None
+    
+    if data:
+        return float(data['price'])
+    else:
+        # Use mock data if API fails
+        if symbol.upper() == "BTCUSDT":
+            return get_mock_price()
+        elif symbol.upper() == "ETHUSDT":
+            return get_mock_price() / 15  # Approx ETH/BTC ratio
+        else:
+            # Default mock price for other pairs
+            return get_mock_price() / 100
 
 def get_funding_rate(symbol: str) -> dict:
-    """Get funding rate data"""
-    # FIXED: Using the correct endpoint for futures funding rate
+    """Get funding rate data with mock data fallback"""
     url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol.upper()}"
     data = make_api_request(url)
-    if not data or len(data) == 0:
-        return None
     
-    # The funding rate endpoint returns an array, so we need to get the first item
-    funding_data = data[0] if isinstance(data, list) else data
-    
-    # Get the mark price separately since it's not in the funding rate endpoint
-    mark_price_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
-    mark_price_data = make_api_request(mark_price_url)
-    mark_price = float(mark_price_data.get('markPrice', 0)) if mark_price_data else 0
-    
-    return {
-        'last_funding_rate': float(funding_data.get('fundingRate', 0)) * 100,
-        'next_funding_time': datetime.fromtimestamp(int(funding_data.get('fundingTime', 0))/1000),
-        'mark_price': mark_price
-    }
+    if data and len(data) > 0:
+        # The funding rate endpoint returns an array, so we need to get the first item
+        funding_data = data[0] if isinstance(data, list) else data
+        
+        # Get the mark price separately
+        mark_price_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
+        mark_price_data = make_api_request(mark_price_url)
+        mark_price = float(mark_price_data.get('markPrice', 0)) if mark_price_data else 0
+        
+        return {
+            'last_funding_rate': float(funding_data.get('fundingRate', 0)) * 100,
+            'next_funding_time': datetime.fromtimestamp(int(funding_data.get('fundingTime', 0))/1000),
+            'mark_price': mark_price
+        }
+    else:
+        # Use mock data if API fails
+        return get_mock_funding_rate()
 
 def get_market_data(symbol: str) -> dict:
-    """Get additional market data"""
-    # FIXED: Using the correct endpoint for futures market data
+    """Get additional market data with mock data fallback"""
     url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol.upper()}"
     data = make_api_request(url)
-    if not data:
-        return None
     
-    return {
-        'volume': float(data.get('volume', 0)),
-        'price_change_percent': float(data.get('priceChangePercent', 0)),
-        'high': float(data.get('highPrice', 0)),
-        'low': float(data.get('lowPrice', 0))
-    }
+    if data:
+        return {
+            'volume': float(data.get('volume', 0)),
+            'price_change_percent': float(data.get('priceChangePercent', 0)),
+            'high': float(data.get('highPrice', 0)),
+            'low': float(data.get('lowPrice', 0))
+        }
+    else:
+        # Use mock data if API fails
+        current_price = get_binance_price(symbol)  # This already uses fallback
+        return get_mock_market_data(current_price)
 
 def get_historical_prices(symbol, interval='1h', limit=24):
-    """Get historical price data for charting"""
-    # FIXED: Using the correct futures klines endpoint for futures data
+    """Get historical price data for charting with mock data fallback"""
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
     data = make_api_request(url)
+    
     if not data:
-        return None
+        # Use mock data if API fails
+        data = generate_mock_price_data(get_binance_price(symbol), bars=limit)
     
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 
                                      'close_time', 'quote_asset_volume', 'number_of_trades', 
@@ -271,11 +364,28 @@ def main():
             padding-right: 0.5rem;
         }
     }
+    /* Warning banner for API access issues */
+    .api-warning {
+        background-color: rgba(255, 171, 0, 0.2);
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        font-size: 0.9rem;
+    }
     </style>
     """, unsafe_allow_html=True)
     
     # App header (smaller for mobile)
     st.markdown('<div class="main-title">📊 Binance Futures Risk Calculator</div>', unsafe_allow_html=True)
+    
+    # Display warning about API access if needed
+    if st.session_state.get('using_mock_data', False):
+        st.markdown("""
+        <div class="api-warning">
+        ⚠️ Note: Using mock data as Binance API access is restricted in your region.
+        All calculations are still functional but prices are simulated.
+        </div>
+        """, unsafe_allow_html=True)
     
     # Main inputs section (outside sidebar for mobile)
     st.subheader("Position Parameters")
@@ -327,15 +437,22 @@ def main():
     # Main content area
     if calc_button:
         with st.spinner("Fetching data..."):
+            # Test API connection first
+            test_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+            try:
+                response = requests.get(test_url, timeout=5)
+                response.raise_for_status()
+                using_mock = False
+            except:
+                using_mock = True
+                st.session_state['using_mock_data'] = True
+                st.warning("Using mock data as Binance API access is restricted in your region.")
+            
             # Fetch market data
             entry_price = get_binance_price(symbol)
             funding_data = get_funding_rate(symbol)
             market_data = get_market_data(symbol)
             historical_data = get_historical_prices(symbol)
-            
-            if not all([entry_price, funding_data, market_data, historical_data is not None]):
-                st.error(f"Failed to fetch data for {symbol}. Please check the symbol and try again.")
-                return
             
             # Calculate position details
             position_details = calculate_position_details(
@@ -468,6 +585,10 @@ def main():
                 st.markdown(f"""
                 <div style="color: {liq_color}; font-weight: bold; font-size: 16px;">{liq_status}</div>
                 """, unsafe_allow_html=True)
+                
+                # Add disclaimer for mock data
+                if using_mock:
+                    st.caption("Note: Using simulated data for demonstration purposes.")
     else:
         # Welcome message - simplified for mobile
         st.info("""
@@ -484,4 +605,8 @@ def main():
     st.caption("This calculator is for educational purposes only. Trading cryptocurrency futures involves significant risk.")
 
 if __name__ == "__main__":
+    # Initialize session state
+    if 'using_mock_data' not in st.session_state:
+        st.session_state['using_mock_data'] = False
+    
     main()
