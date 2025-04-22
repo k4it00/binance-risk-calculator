@@ -4,86 +4,8 @@ import time
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import json
-import random
 
-# === Mock data functions for when API access is restricted ===
-def generate_mock_price_data(base_price=30000, volatility=0.02, bars=24):
-    """Generate realistic mock price data for testing"""
-    timestamps = []
-    prices = []
-    
-    current_price = base_price
-    now = datetime.now()
-    
-    for i in range(bars):
-        # Generate timestamp (going back in time)
-        ts = now - timedelta(hours=(bars-i))
-        timestamps.append(ts)
-        
-        # Randomly adjust price with some volatility
-        change = random.uniform(-volatility, volatility)
-        current_price = current_price * (1 + change)
-        prices.append(current_price)
-    
-    # Create OHLC data from the price series
-    data = []
-    for i, (ts, close) in enumerate(zip(timestamps, prices)):
-        # Create some variation in OHLC
-        open_price = close * (1 - random.uniform(-0.005, 0.005))
-        high = max(open_price, close) * (1 + random.uniform(0.001, 0.008))
-        low = min(open_price, close) * (1 - random.uniform(0.001, 0.008))
-        
-        # Format similar to Binance API response
-        data.append([
-            int(ts.timestamp() * 1000),  # timestamp in ms
-            str(open_price),
-            str(high),
-            str(low),
-            str(close),
-            str(close * random.uniform(50, 500)),  # volume
-            int((ts + timedelta(hours=1)).timestamp() * 1000),  # close time
-            str(close * random.uniform(50, 500) * close),  # quote asset volume
-            str(random.randint(1000, 10000)),  # number of trades
-            str(close * random.uniform(20, 200)),  # taker buy base
-            str(close * random.uniform(20, 200) * close),  # taker buy quote
-            "0"  # ignore
-        ])
-    
-    return data
-
-def get_mock_price():
-    """Get mock current price"""
-    # Realistic BTC price range
-    return random.uniform(29000, 33000)
-
-def get_mock_funding_rate():
-    """Get mock funding rate data"""
-    now = datetime.now()
-    # Next funding time is every 8 hours: 00:00, 08:00, 16:00 UTC
-    current_hour = now.hour
-    next_funding_hour = (current_hour // 8 + 1) * 8 % 24
-    next_funding_time = now.replace(hour=next_funding_hour, minute=0, second=0, microsecond=0)
-    if next_funding_hour < current_hour:
-        next_funding_time += timedelta(days=1)
-    
-    # Realistic funding rate
-    return {
-        'last_funding_rate': random.uniform(-0.05, 0.05),
-        'next_funding_time': next_funding_time,
-        'mark_price': get_mock_price()
-    }
-
-def get_mock_market_data(base_price):
-    """Get mock market data"""
-    return {
-        'volume': random.uniform(10000, 50000),
-        'price_change_percent': random.uniform(-5, 5),
-        'high': base_price * (1 + random.uniform(0.01, 0.05)),
-        'low': base_price * (1 - random.uniform(0.01, 0.05))
-    }
-
-# === Binance API functions with error handling, rate limiting, and mock data fallback ===
+# === Binance API functions with error handling and rate limiting ===
 def make_api_request(url, max_retries=3, retry_delay=1):
     """Make API request with retry logic and proper error handling"""
     for attempt in range(max_retries):
@@ -93,76 +15,50 @@ def make_api_request(url, max_retries=3, retry_delay=1):
             return response.json()
         except requests.exceptions.RequestException as e:
             if attempt == max_retries - 1:
-                st.warning(f"Warning: Could not connect to Binance API. Using mock data for demonstration.")
+                st.error(f"Error fetching data: {e}")
                 return None
             time.sleep(retry_delay)
     return None
 
 def get_binance_price(symbol: str) -> float:
-    """Get current price from Binance with mock data fallback"""
+    """Get current price from Binance with improved error handling"""
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}"
     data = make_api_request(url)
-    
-    if data:
-        return float(data['price'])
-    else:
-        # Use mock data if API fails
-        if symbol.upper() == "BTCUSDT":
-            return get_mock_price()
-        elif symbol.upper() == "ETHUSDT":
-            return get_mock_price() / 15  # Approx ETH/BTC ratio
-        else:
-            # Default mock price for other pairs
-            return get_mock_price() / 100
+    return float(data['price']) if data else None
 
 def get_funding_rate(symbol: str) -> dict:
-    """Get funding rate data with mock data fallback"""
-    url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol.upper()}"
+    """Get funding rate data with more comprehensive information"""
+    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
     data = make_api_request(url)
+    if not data:
+        return None
     
-    if data and len(data) > 0:
-        # The funding rate endpoint returns an array, so we need to get the first item
-        funding_data = data[0] if isinstance(data, list) else data
-        
-        # Get the mark price separately
-        mark_price_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol.upper()}"
-        mark_price_data = make_api_request(mark_price_url)
-        mark_price = float(mark_price_data.get('markPrice', 0)) if mark_price_data else 0
-        
-        return {
-            'last_funding_rate': float(funding_data.get('fundingRate', 0)) * 100,
-            'next_funding_time': datetime.fromtimestamp(int(funding_data.get('fundingTime', 0))/1000),
-            'mark_price': mark_price
-        }
-    else:
-        # Use mock data if API fails
-        return get_mock_funding_rate()
+    return {
+        'last_funding_rate': float(data.get('lastFundingRate', 0)) * 100,
+        'next_funding_time': datetime.fromtimestamp(data.get('nextFundingTime', 0)/1000),
+        'mark_price': float(data.get('markPrice', 0))
+    }
 
 def get_market_data(symbol: str) -> dict:
-    """Get additional market data with mock data fallback"""
+    """Get additional market data for better analysis"""
     url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol.upper()}"
     data = make_api_request(url)
+    if not data:
+        return None
     
-    if data:
-        return {
-            'volume': float(data.get('volume', 0)),
-            'price_change_percent': float(data.get('priceChangePercent', 0)),
-            'high': float(data.get('highPrice', 0)),
-            'low': float(data.get('lowPrice', 0))
-        }
-    else:
-        # Use mock data if API fails
-        current_price = get_binance_price(symbol)  # This already uses fallback
-        return get_mock_market_data(current_price)
+    return {
+        'volume': float(data.get('volume', 0)),
+        'price_change_percent': float(data.get('priceChangePercent', 0)),
+        'high': float(data.get('highPrice', 0)),
+        'low': float(data.get('lowPrice', 0))
+    }
 
 def get_historical_prices(symbol, interval='1h', limit=24):
-    """Get historical price data for charting with mock data fallback"""
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
+    """Get historical price data for charting"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
     data = make_api_request(url)
-    
     if not data:
-        # Use mock data if API fails
-        data = generate_mock_price_data(get_binance_price(symbol), bars=limit)
+        return None
     
     df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 
                                      'close_time', 'quote_asset_volume', 'number_of_trades', 
@@ -204,9 +100,15 @@ def calculate_position_details(entry_price, account_balance, risk_percent, stop_
     # Calculate risk amount in dollars
     risk_amount = account_balance * (risk_percent / 100)
     
+    # Calculate price movement from entry to stop loss
+    if position_type == "Long":
+        price_movement_percent = stop_loss_percent
+    else:
+        price_movement_percent = stop_loss_percent
+    
     # Calculate position size that will lose exactly risk_amount when stopped out
     # Factor in the leverage since price movement is multiplied by leverage
-    leveraged_position_size = (risk_amount / (stop_loss_percent / 100)) / leverage
+    leveraged_position_size = (risk_amount / (price_movement_percent / 100)) / leverage
     
     # Calculate margin required (the actual capital allocated)
     margin_required = leveraged_position_size / leverage
@@ -222,7 +124,7 @@ def calculate_position_details(entry_price, account_balance, risk_percent, stop_
     adjusted_risk_amount = risk_amount - total_fees_sl
     
     # Recalculate position size with fee adjustment
-    adjusted_leveraged_position_size = (adjusted_risk_amount / (stop_loss_percent / 100)) / leverage
+    adjusted_leveraged_position_size = (adjusted_risk_amount / (price_movement_percent / 100)) / leverage
     
     # Calculate stop loss and take profit prices
     stop_loss_price = calculate_stop_loss(entry_price, stop_loss_percent, position_type)
@@ -246,9 +148,9 @@ def calculate_position_details(entry_price, account_balance, risk_percent, stop_
     breakeven_win_rate = 1 / (1 + r_multiple)
     
     return {
-        'position_size': adjusted_leveraged_position_size * leverage,
-        'actual_position_size': adjusted_leveraged_position_size,
-        'margin_required': adjusted_leveraged_position_size,
+        'position_size': adjusted_leveraged_position_size * leverage,  # Total position size with leverage
+        'actual_position_size': adjusted_leveraged_position_size,      # Position size without leverage
+        'margin_required': adjusted_leveraged_position_size,           # Capital actually being risked
         'risk_amount': risk_amount,
         'entry_fee': entry_fee,
         'exit_fee_sl': exit_fee_sl,
@@ -265,8 +167,10 @@ def calculate_position_details(entry_price, account_balance, risk_percent, stop_
         'account_risk_percent': risk_percent
     }
 
+
+# === Streamlit UI functions ===
 def plot_price_chart(df, entry_price, stop_loss_price, take_profit_price, liquidation_price, position_type):
-    """Create a mobile-friendly price chart with position levels"""
+    """Create a price chart with position levels"""
     fig = go.Figure()
     
     # Add price candlesticks
@@ -296,15 +200,39 @@ def plot_price_chart(df, entry_price, stop_loss_price, take_profit_price, liquid
         fig.add_hline(y=price, line_width=1, line_dash="dash", line_color=line_colors[label],
                      annotation_text=f"{label}: {price:.2f}")
     
-    # Customize chart for mobile view
+    # Customize chart
     fig.update_layout(
-        title=f"Price Chart with Position Levels",
+        title=f"Price Chart with {'Long' if position_type == 'Long' else 'Short'} Position Levels",
         xaxis_title="Time",
         yaxis_title="Price (USDT)",
-        height=300,  # Smaller height for mobile
+        height=500,
         xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        margin=dict(l=10, r=10, t=50, b=30)  # Compact margins for mobile
+        template="plotly_dark"
+    )
+    
+    return fig
+
+def display_win_probability_chart(r_ratio):
+    """Display win probability chart based on R ratio"""
+    win_rates = [10, 20, 30, 40, 50, 60, 70, 80, 90]
+    expected_values = [(win_rate/100 * r_ratio) - ((100-win_rate)/100) for win_rate in win_rates]
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=win_rates,
+        y=expected_values,
+        marker_color=['red' if ev < 0 else 'green' for ev in expected_values],
+        text=[f"{ev:.2f}" for ev in expected_values],
+        textposition='auto'
+    ))
+    
+    fig.update_layout(
+        title="Expected Value by Win Rate",
+        xaxis_title="Win Rate (%)",
+        yaxis_title="Expected Value (R)",
+        height=300,
+        template="plotly_dark"
     )
     
     return fig
@@ -323,136 +251,92 @@ def format_funding_time(dt):
 
 # === Main app ===
 def main():
-    st.set_page_config(
-        page_title="Mobile Risk Calculator", 
-        layout="centered",  # Better for mobile
-        initial_sidebar_state="collapsed"  # Start with sidebar collapsed on mobile
-    )
+    st.set_page_config(page_title="Binance Futures Risk Calculator", layout="wide")
     
-    # Custom CSS for mobile
+    # Define custom CSS
     st.markdown("""
     <style>
     .main-title {
-        font-size: 1.5rem;
+        font-size: 2.5rem;
         font-weight: 700;
         color: #F0B90B;
         text-align: center;
-        margin-bottom: 0.5rem;
+        margin-bottom: 1rem;
     }
     .stTabs [data-baseweb="tab-list"] {
         gap: 2px;
     }
     .stTabs [data-baseweb="tab"] {
         border-radius: 4px 4px 0px 0px;
-        padding: 8px 12px;
-        font-size: 0.8rem;
+        padding: 10px 20px;
         background-color: #1E2126;
     }
     .stTabs [aria-selected="true"] {
         background-color: #F0B90B;
         color: black;
     }
-    /* Mobile optimizations */
-    @media (max-width: 640px) {
-        .stButton button {
-            width: 100%;
-            padding: 0.5rem;
-            font-size: 1rem;
-        }
-        div[data-testid="stVerticalBlock"] > div {
-            padding-left: 0.5rem;
-            padding-right: 0.5rem;
-        }
-    }
-    /* Warning banner for API access issues */
-    .api-warning {
-        background-color: rgba(255, 171, 0, 0.2);
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 10px;
-        font-size: 0.9rem;
-    }
     </style>
     """, unsafe_allow_html=True)
     
-    # App header (smaller for mobile)
-    st.markdown('<div class="main-title">📊 Binance Futures Risk Calculator</div>', unsafe_allow_html=True)
+    # App header
+    st.markdown('<div class="main-title">📊 Binance Futures Risk Calculator Pro</div>', unsafe_allow_html=True)
     
-    # Display warning about API access if needed
-    if st.session_state.get('using_mock_data', False):
-        st.markdown("""
-        <div class="api-warning">
-        ⚠️ Note: Using mock data as Binance API access is restricted in your region.
-        All calculations are still functional but prices are simulated.
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Main inputs section (outside sidebar for mobile)
-    st.subheader("Position Parameters")
-    
-    # Common parameters - using columns for compact layout
-    col1, col2 = st.columns(2)
-    with col1:
+    # Sidebar inputs
+    with st.sidebar:
+        st.subheader("Position Parameters")
+        
+        # Common parameters
         symbol = st.text_input("Trading Pair", value="BTCUSDT").upper()
-    with col2:
-        position_type = st.selectbox("Position Type", ["Long", "Short"])
-    
-    # Account and risk parameters
-    st.subheader("Account & Risk")
-    col1, col2 = st.columns(2)
-    with col1:
+        position_type = st.radio("Position Type", ["Long", "Short"])
+        
+        # Account and risk parameters
+        st.subheader("Account & Risk Parameters")
         account_balance = st.number_input("Account Balance (USDT)", value=1000.0, step=100.0, min_value=10.0)
-    with col2:
-        risk_percent = st.slider("Risk %", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-    
-    # Position parameters
-    st.subheader("Trading Parameters")
-    col1, col2 = st.columns(2)
-    with col1:
-        stop_loss_percent = st.number_input("Stop Loss %", min_value=0.1, max_value=20.0, value=1.5, step=0.1)
-    with col2:
-        take_profit_percent = st.number_input("Take Profit %", min_value=0.1, max_value=50.0, value=4.5, step=0.1)
-    
-    leverage = st.slider("Leverage", min_value=1, max_value=125, value=10)
-    
-    # Fee type as a simple dropdown for mobile
-    fee_options = {
-        "Low (0.02%/0.04%)": (0.0002, 0.0004),
-        "Standard (0.04%/0.06%)": (0.0004, 0.0006),
-        "High (0.05%/0.08%)": (0.0005, 0.0008)
-    }
-    fee_type = st.selectbox("Fee Level", list(fee_options.keys()))
-    maker_fee, taker_fee = fee_options[fee_type]
-    
-    # Simplified advanced options (just a checkbox toggle)
-    show_advanced = st.checkbox("Show Advanced Options")
-    if show_advanced:
-        maintenance_margin = st.slider("Maintenance Margin %", min_value=0.2, max_value=5.0, value=0.5, step=0.1) / 100
-    else:
-        maintenance_margin = 0.005
-    
-    # Calculate button - full width for easy tapping on mobile
-    calc_button = st.button("📊 Calculate Position", use_container_width=True)
+        risk_percent = st.slider("Risk % of Account", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+        
+        # Position parameters
+        st.subheader("Position Parameters")
+        col1, col2 = st.columns(2)
+        with col1:
+            stop_loss_percent = st.number_input("Stop Loss %", min_value=0.1, max_value=20.0, value=1.5, step=0.1)
+        with col2:
+            take_profit_percent = st.number_input("Take Profit %", min_value=0.1, max_value=50.0, value=4.5, step=0.1)
+        
+        leverage = st.slider("Leverage", min_value=1, max_value=125, value=10)
+        
+        # Trading fee type
+        fee_type = st.radio("Fee Level", ["Maker/Taker (0.02%/0.04%)", "Standard (0.04%/0.06%)", "High (0.05%/0.08%)"])
+        
+        if fee_type == "Maker/Taker (0.02%/0.04%)":
+            maker_fee, taker_fee = 0.0002, 0.0004
+        elif fee_type == "Standard (0.04%/0.06%)":
+            maker_fee, taker_fee = 0.0004, 0.0006
+        else:
+            maker_fee, taker_fee = 0.0005, 0.0008
+        
+        # Advanced settings toggle
+        show_advanced = st.checkbox("Show Advanced Options")
+        
+        if show_advanced:
+            maintenance_margin = st.slider("Maintenance Margin %", min_value=0.2, max_value=5.0, value=0.5, step=0.1) / 100
+        else:
+            maintenance_margin = 0.005
+        
+        # Add a "Calculate" button
+        calc_button = st.button("📊 Calculate Position", use_container_width=True)
     
     # Main content area
     if calc_button:
-        with st.spinner("Fetching data..."):
-            # Test API connection first
-            test_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-            try:
-                response = requests.get(test_url, timeout=5)
-                response.raise_for_status()
-                using_mock = False
-            except:
-                using_mock = True
-                st.session_state['using_mock_data'] = True
-                st.warning("Using mock data as Binance API access is restricted in your region.")
-            
+        with st.spinner("Fetching latest market data..."):
             # Fetch market data
             entry_price = get_binance_price(symbol)
             funding_data = get_funding_rate(symbol)
             market_data = get_market_data(symbol)
             historical_data = get_historical_prices(symbol)
+            
+            if not all([entry_price, funding_data, market_data, historical_data is not None]):
+                st.error(f"Failed to fetch data for {symbol}. Please check the symbol and try again.")
+                return
             
             # Calculate position details
             position_details = calculate_position_details(
@@ -467,13 +351,13 @@ def main():
                 taker_fee=taker_fee
             )
             
-            # Use tabs with simplified names for mobile space efficiency
-            tabs = st.tabs(["Overview", "Price Levels", "Chart", "Market"])
+            # Create tabs for different information sections
+            tabs = st.tabs(["Position Overview", "Analysis", "Chart", "Market Data"])
             
-            # Tab 1: Overview
+            # Tab 1: Position Overview
             with tabs[0]:
-                # Market price and funding rate
-                col1, col2 = st.columns(2)
+                # Market price and key metrics
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric(
                         label="Current Price", 
@@ -482,62 +366,100 @@ def main():
                     )
                 with col2:
                     st.metric(
+                        label="24h High/Low", 
+                        value=f"${market_data['high']:,.2f}",
+                        delta=f"Low: ${market_data['low']:,.2f}"
+                    )
+                with col3:
+                    st.metric(
                         label="Funding Rate", 
                         value=f"{funding_data['last_funding_rate']:.4f}%",
                         delta=f"Next: {format_funding_time(funding_data['next_funding_time'])}"
                     )
                 
-                # Position summary - simplified for mobile
-                st.subheader(f"{'🟢 Long' if position_type == 'Long' else '🔴 Short'} Position")
+                # Position details
+                st.subheader(f"{'🟢 Long' if position_type == 'Long' else '🔴 Short'} Position Details")
                 
-                # Position size and risk - succinct for mobile
-                st.info(f"""
-                • Position: ${position_details['position_size']:,.2f}
-                • Margin: ${position_details['margin_required']:,.2f}
-                • Risk: ${position_details['risk_amount']:,.2f} ({risk_percent:.1f}%)
-                • R:R Ratio: 1:{position_details['r_multiple']:.2f}
-                • Fees: ${position_details['total_fees_sl']:,.2f}
-                """)
-            
-            # Tab 2: Price Levels
-            with tabs[1]:
-                # Key price levels with colors for visual hierarchy
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"""
+                    ### Size & Margin
+                    - **Position Size**: ${position_details['position_size']:,.2f}
+                    - **Margin Required**: ${position_details['margin_required']:,.2f}
+                    - **Leverage**: {leverage}x
+                    - **Account Risk**: ${position_details['risk_amount']:,.2f} ({risk_percent:.1f}%)
+                    """)
+                
+                with col2:
+                    st.markdown(f"""
+                    ### Fees & Costs
+                    - **Entry Fee**: ${position_details['entry_fee']:,.2f}
+                    - **Exit Fee (SL)**: ${position_details['exit_fee_sl']:,.2f}
+                    - **Exit Fee (TP)**: ${position_details['exit_fee_tp']:,.2f}
+                    - **Total Fees (worst case)**: ${position_details['total_fees_sl']:,.2f}
+                    """)
+                
+                # Key price levels
                 st.subheader("Key Price Levels")
+                col1, col2, col3, col4 = st.columns(4)
                 
-                # Entry
-                st.markdown(f"""
-                **Entry Price:** ${entry_price:,.2f}
-                """)
+                with col1:
+                    st.markdown(f"""
+                    ### Entry
+                    **${entry_price:,.2f}**
+                    """)
                 
-                # Stop Loss - red background
-                st.markdown(f"""
-                <div style="background-color: rgba(255,0,0,0.1); padding: 8px; border-radius: 5px; margin-bottom: 8px;">
-                <strong>Stop Loss:</strong> ${position_details['stop_loss_price']:,.2f}<br>
-                Loss: ${abs(position_details['potential_loss']):,.2f}
-                </div>
-                """, unsafe_allow_html=True)
+                with col2:
+                    sl_color = "🔴" if position_details['potential_loss'] < 0 else "🟢"
+                    st.markdown(f"""
+                    ### Stop Loss {sl_color}
+                    **${position_details['stop_loss_price']:,.2f}**
+                    Loss: ${abs(position_details['potential_loss']):,.2f}
+                    """)
                 
-                # Take Profit - green background
-                st.markdown(f"""
-                <div style="background-color: rgba(0,255,0,0.1); padding: 8px; border-radius: 5px; margin-bottom: 8px;">
-                <strong>Take Profit:</strong> ${position_details['take_profit_price']:,.2f}<br>
-                Profit: ${position_details['potential_profit']:,.2f}
-                </div>
-                """, unsafe_allow_html=True)
+                with col3:
+                    tp_color = "🟢" if position_details['potential_profit'] > 0 else "🔴"
+                    st.markdown(f"""
+                    ### Take Profit {tp_color}
+                    **${position_details['take_profit_price']:,.2f}**
+                    Profit: ${position_details['potential_profit']:,.2f}
+                    """)
                 
-                # Liquidation - yellow/warning background
-                liq_distance = abs((position_details['liquidation_price'] - entry_price) / entry_price * 100)
-                st.markdown(f"""
-                <div style="background-color: rgba(255,255,0,0.1); padding: 8px; border-radius: 5px;">
-                <strong>Liquidation:</strong> ${position_details['liquidation_price']:,.2f}<br>
-                Distance: {liq_distance:.2f}%
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Win rate needed
-                st.info(f"Breakeven Win Rate: {position_details['breakeven_win_rate']:.1f}%")
+                with col4:
+                    st.markdown(f"""
+                    ### Liquidation ⚠️
+                    **${position_details['liquidation_price']:,.2f}**
+                    Distance: {abs(((position_details['liquidation_price'] - entry_price) / entry_price) * 100):,.2f}%
+                    """)
             
-            # Tab 3: Chart - simplified for mobile
+            # Tab 2: Analysis
+            with tabs[1]:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Risk/Reward Analysis")
+                    st.markdown(f"""
+                    - **Risk/Reward Ratio**: 1:{position_details['r_multiple']:.2f}
+                    - **Breakeven Win Rate**: {position_details['breakeven_win_rate']:.1f}%
+                    - **Potential Loss**: ${abs(position_details['potential_loss']):,.2f}
+                    - **Potential Profit**: ${position_details['potential_profit']:,.2f}
+                    """)
+                    
+                    st.markdown("""
+                    ### Strategy Guidelines
+                    
+                    For consistent profitability:
+                    - Aim for R:R ratios of at least 1:2
+                    - Keep risk per trade between 1-2% of account
+                    - Use technical analysis to place stop losses at logical levels
+                    - Consider reducing position size during high volatility
+                    """)
+                
+                with col2:
+                    st.subheader("Win Rate Analysis")
+                    st.plotly_chart(display_win_probability_chart(position_details['r_multiple']))
+            
+            # Tab 3: Chart
             with tabs[2]:
                 st.plotly_chart(
                     plot_price_chart(
@@ -551,62 +473,105 @@ def main():
                     use_container_width=True
                 )
             
-            # Tab 4: Market Data - simplified for mobile
+            # Tab 4: Market Data
             with tabs[3]:
-                # Market overview
-                st.subheader(f"{symbol} Market Data")
-                
-                # Create two columns for market stats
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.metric("24h Volume", f"{market_data['volume']:,.1f}")
-                    st.metric("24h High", f"${market_data['high']:,.2f}")
+                    st.subheader("Market Overview")
+                    st.markdown(f"""
+                    ### {symbol} Market Data
+                    - **24h Volume**: {market_data['volume']:,.2f}
+                    - **24h Price Change**: {market_data['price_change_percent']:.2f}%
+                    - **24h High**: ${market_data['high']:,.2f}
+                    - **24h Low**: ${market_data['low']:,.2f}
+                    """)
+                    
+                    st.subheader("Funding Information")
+                    next_funding_time = funding_data['next_funding_time'].strftime("%Y-%m-%d %H:%M:%S")
+                    st.markdown(f"""
+                    - **Current Rate**: {funding_data['last_funding_rate']:.4f}%
+                    - **Next Funding Time**: {next_funding_time}
+                    - **Funding Impact (8h)**: ${(funding_data['last_funding_rate'] / 100 * position_details['position_size']):,.2f}
+                    """)
                 
                 with col2:
-                    st.metric("24h Change", f"{market_data['price_change_percent']:.2f}%")
-                    st.metric("24h Low", f"${market_data['low']:,.2f}")
-                
-                # Funding impact estimation
-                funding_impact = funding_data['last_funding_rate'] / 100 * position_details['position_size']
-                st.info(f"Funding Impact (8h): ${funding_impact:,.2f}")
-                
-                # Liquidation risk indicator
-                if liq_distance < 5:
-                    liq_status = "⚠️ DANGER - Very close to liquidation!"
-                    liq_color = "red"
-                elif liq_distance < 10:
-                    liq_status = "⚠️ WARNING - Liquidation risk"
-                    liq_color = "orange"
-                else:
-                    liq_status = "✅ SAFE - Good distance"
-                    liq_color = "green"
-                
-                st.markdown(f"""
-                <div style="color: {liq_color}; font-weight: bold; font-size: 16px;">{liq_status}</div>
-                """, unsafe_allow_html=True)
-                
-                # Add disclaimer for mock data
-                if using_mock:
-                    st.caption("Note: Using simulated data for demonstration purposes.")
+                    st.subheader("Position Health")
+                    
+                    # Calculate distance to liquidation
+                    liq_distance = abs((position_details['liquidation_price'] - entry_price) / entry_price * 100)
+                    
+                    # Set thresholds
+                    if liq_distance < 5:
+                        liq_status = "⚠️ DANGER - Very close to liquidation!"
+                        liq_color = "red"
+                    elif liq_distance < 10:
+                        liq_status = "⚠️ WARNING - Liquidation risk present"
+                        liq_color = "orange"
+                    elif liq_distance < 20:
+                        liq_status = "✓ ACCEPTABLE - Moderate safety buffer"
+                        liq_color = "yellow"
+                    else:
+                        liq_status = "✅ SAFE - Good distance from liquidation"
+                        liq_color = "green"
+                    
+                    st.markdown(f"""
+                    ### Liquidation Risk
+                    <div style="color: {liq_color}; font-weight: bold; font-size: 18px;">{liq_status}</div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Create liquidation distance progress bar
+                    st.progress(min(1.0, max(0.0, 1.0 - (liq_distance * 0.05))))
+                    st.caption(f"Distance to liquidation: {liq_distance:.2f}%")
+                    
+                    # Position cost analysis
+                    st.subheader("Cost Analysis")
+                    st.markdown(f"""
+                    ### Position Costs
+                    - **Margin Required**: ${position_details['margin_required']:,.2f}
+                    - **Fees as % of Margin**: {(position_details['total_fees_sl'] / position_details['margin_required'] * 100):,.2f}%
+                    """)
     else:
-        # Welcome message - simplified for mobile
-        st.info("""
-        ### Quick Start Guide
+        # Show welcome message when calculator is not yet run
+        st.markdown("""
+        ## Welcome to the Binance Futures Risk Calculator Pro
         
-        1. Enter your trading pair (e.g., BTCUSDT)
-        2. Set your account size and risk %
-        3. Define stop loss and take profit
-        4. Select your leverage
-        5. Tap "Calculate Position"
+        This advanced tool helps you:
+        
+        1. **Calculate optimal position sizing** based on your risk tolerance
+        2. **Visualize key price levels** including stop loss, take profit, and liquidation
+        3. **Analyze risk-reward ratios** and potential outcomes
+        4. **Track funding rates** and market conditions
+        
+        To get started:
+        1. Enter your trading pair in the sidebar (e.g., BTCUSDT, ETHUSDT)
+        2. Configure your account size and risk parameters
+        3. Set your desired stop loss, take profit and leverage
+        4. Click "Calculate Position" to see comprehensive analysis
+        
+        **This calculator is for educational purposes only. Always do your own research and trade responsibly.**
+        """)
+        
+        # Display tips section
+        st.info("""
+        ### Tips for Responsible Trading
+        
+        - Never risk more than 1-2% of your account per trade
+        - Use leverage cautiously - higher leverage means higher liquidation risk
+        - Always use stop losses to protect your capital
+        - Consider the impact of funding rates on long-term positions
+        - Monitor market volatility and adjust position sizes accordingly
         """)
     
-    # Footer - simplified for mobile
-    st.caption("This calculator is for educational purposes only. Trading cryptocurrency futures involves significant risk.")
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; color: gray; font-size: 0.8rem;">
+    This calculator is for educational purposes only. Trading cryptocurrency futures involves significant risk.
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    # Initialize session state
-    if 'using_mock_data' not in st.session_state:
-        st.session_state['using_mock_data'] = False
-    
     main()
+    
+#streamlit run riskmanagement.py 
